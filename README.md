@@ -70,6 +70,41 @@ A UEFI application. UEFI already provides display, keyboard, memory map, network
 
 A normal process using stdin/stdout. For development and testing.
 
+## Operating Modes
+
+IRVibeOS devices operate in one of two modes depending on their capabilities and bootstrap state.
+
+### Mode A: Host-driven vibe (开发/引导模式)
+
+Used for tier0 (bare MCU) and initial bootstrap of any tier.
+
+**How it works:**
+- Host PC runs `ai_host.py vibe <intent>`
+- AI generates IR on host
+- Host compiles IR to target architecture (using `llc`)
+- Host sends compiled binary via TALK protocol EXEC command
+- Device executes received code
+
+**Used for:** bootstrapping, development, constrained devices without network
+
+### Mode B: Device-driven vibe (自主模式)
+
+Used by tier1+ (networked devices) after loading `vibe_engine.ll`.
+
+**How it works:**
+- Device accepts user intent (via serial/display/web input)
+- Device calls AI API over network (WiFi/Ethernet/TLS)
+- AI returns LLVM IR text to device
+- Device compiles IR:
+  - **Tier1 (ESP32)**: sends IR to cloud compiler service, receives native binary
+  - **Tier2 (PC/UEFI)**: compiles locally using `llc` or ORC JIT
+- Device loads and executes generated code
+- Device can fetch reference code from GitHub
+
+**Used for:** deployed/autonomous operation after bootstrap
+
+**Transition:** Device boots in Mode A, loads `vibe_engine.ll` once, then operates in Mode B indefinitely. Host PC becomes optional.
+
 ## TALK Protocol (MCU mode)
 
 For constrained devices communicating with a host:
