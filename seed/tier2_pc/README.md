@@ -25,17 +25,15 @@ Tier2 种子是一个 UEFI 应用。UEFI Boot Services 已经提供了显示（G
 - Device loads `vibe_engine.ll` + LLVM toolchain (once, via Mode A or EFI partition)
 - Device accepts user intent via GOP display + keyboard
 - Device calls AI API over TCP/TLS (UEFI protocols)
-- **Option 1**: AI generates x86-64 machine code directly (base64-encoded)
-  - Device decodes and loads into executable memory
-- **Option 2**: AI generates LLVM IR, device compiles locally using `llc` or ORC JIT
-  - For complex functionality where IR is more reliable than direct machine code
-- Device loads and executes generated code
+- **AI generates LLVM IR** (`.ll` format)
+- Device compiles IR locally using `llc` or ORC JIT
+- Device loads and executes compiled code
 - **Used for**: standalone operation, no external dependencies
 - **用于**：独立运行，无外部依赖
 
-**Key advantage**: PC has enough resources to run LLVM toolchain locally, so both direct machine code generation and local IR compilation are viable options.
+**IR-first architecture**: Tier2 preserves the LLVM IR source model. All generated code is IR that gets compiled locally, maintaining the system's IR-as-source philosophy.
 
-**关键优势**：PC 有足够资源在本地运行 LLVM 工具链，因此直接生成机器码和本地 IR 编译两种方案都可行。
+**IR 优先架构**：Tier2 保留 LLVM IR 源码模型。所有生成的代码都是 IR，在本地编译，维持系统 IR 即源码的理念。
 
 ```
 seed.ll (IR, ~300-400 lines / 约 300-400 行):
@@ -53,12 +51,12 @@ seed.ll (IR, ~300-400 lines / 约 300-400 行):
 vibe_engine.ll (from src_ir/, ~400 lines / 来自 src_ir/，约 400 行):
   - Vibe loop: display prompt, read intent, call AI API
     Vibe 循环：显示提示符、读取意图、调用 AI API
-  - AI generates machine code (base64) or LLVM IR
-    AI 生成机器码（base64）或 LLVM IR
-  - If machine code: decode and execute directly
-    如果是机器码：直接解码并执行
-  - If IR: compile locally using llc or ORC JIT, then execute
-    如果是 IR：使用 llc 或 ORC JIT 本地编译，然后执行
+  - AI generates LLVM IR
+    AI 生成 LLVM IR
+  - Compile IR locally using llc or ORC JIT
+    使用 llc 或 ORC JIT 本地编译 IR
+  - Load and execute compiled code
+    加载并执行编译后的代码
 
 Platform externals (UEFI protocols, resolved at link time):
 平台外部函数（UEFI 协议，链接时解析）:

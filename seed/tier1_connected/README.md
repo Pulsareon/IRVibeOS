@@ -25,15 +25,17 @@ Tier1 种子面向有网络能力（WiFi/BLE）但算力有限（无法本地跑
 - Device loads `vibe_engine.ll` (from `src_ir/vibe_engine.ll`)
 - Device accepts user intent via serial/display/web
 - Device calls AI API over WiFi/TLS
-- **AI generates ready-to-execute machine code (base64-encoded)** for the target architecture
+- **AI generates base64-encoded machine code** (Xtensa or RISC-V) directly
+  - ESP32 cannot run compiler locally (only 520KB SRAM)
+  - AI is instructed to generate ready-to-execute binary
 - Device decodes base64 and loads into executable memory
 - Device executes the generated code
 - **Used for**: deployed/autonomous operation after bootstrap
 - **用于**：引导后的部署/自主运行
 
-**Key difference from Mode A**: No separate compilation step. AI is prompted with the target architecture (e.g., "xtensa" for ESP32-S3, "riscv32" for ESP32-C3) and generates the final binary directly.
+**Exception to IR-first architecture**: Tier1 is the only tier where AI generates machine code instead of IR, because the device lacks resources to run a compiler.
 
-**与 Mode A 的关键区别**：无需单独的编译步骤。AI 获得目标架构提示（例如 ESP32-S3 用 "xtensa"，ESP32-C3 用 "riscv32"）并直接生成最终二进制。
+**IR 优先架构的例外**：Tier1 是唯一让 AI 生成机器码而非 IR 的层级，因为设备缺乏运行编译器的资源。
 
 ```
 seed.ll (IR, ~300 lines / 约 300 行):

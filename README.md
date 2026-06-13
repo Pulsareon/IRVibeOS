@@ -94,16 +94,15 @@ Used by tier1+ (networked devices) after loading `vibe_engine.ll`.
 **How it works:**
 - Device accepts user intent (via serial/display/web input)
 - Device calls AI API over network (WiFi/Ethernet/TLS)
-- **AI generates executable machine code** (base64-encoded) for the target architecture
-  - Tier1 (ESP32): Xtensa or RISC-V machine code
-  - Tier2 (PC): x86-64 or ARM64 machine code (or optionally LLVM IR for local compilation)
-- Device decodes base64 and loads into executable memory
-- Device executes generated code
+- **AI generates code based on device capabilities:**
+  - **Tier1 (ESP32, no compiler)**: AI generates base64-encoded machine code directly
+  - **Tier2+ (PC, has compiler)**: AI generates LLVM IR, device compiles locally using `llc` or ORC JIT
+- Device loads and executes generated code
 - Device can fetch reference code from GitHub
 
 **Used for:** deployed/autonomous operation after bootstrap
 
-**Key difference from Mode A:** No separate compilation step. AI is prompted with the target architecture and generates ready-to-execute binary code directly.
+**IR-first architecture:** The system preserves LLVM IR as the primary source format where possible. Only resource-constrained devices without local compilation capability receive direct machine code from AI.
 
 **Transition:** Device boots in Mode A, loads `vibe_engine.ll` once, then operates in Mode B indefinitely. Host PC becomes optional.
 
