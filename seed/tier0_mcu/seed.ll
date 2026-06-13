@@ -80,7 +80,7 @@ do_exec:
   %slot_end = getelementptr i8, ptr @code_slot, i32 %safe_len
   call void @llvm.clear_cache(ptr @code_slot, ptr %slot_end)
   ; Execute / 执行
-  %result = call i32 ptr @code_slot()
+  %result = call i32 @code_slot()
   ; Reply / 回复
   call void @send_sync()
   call void @seed_send_byte(i8 0)

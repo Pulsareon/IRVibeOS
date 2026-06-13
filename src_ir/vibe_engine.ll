@@ -43,20 +43,20 @@ declare i32 @json_extract_string(ptr, ptr, ptr, i32)  ; json, key, out_buf, out_
 @device_tier = global i32 0     ; 1=tier1 (no compiler, AI generates binary), 2+=tier2+ (has compiler, AI generates IR)
 
 ; String constants / 字符串常量
-@prompt_str = private constant [20 x i8] c"irvibeos vibe> \00\00\00\00\00"
-@intent_prompt = private constant [18 x i8] c"Enter intent: \00\00\00\00"
-@generating_msg = private constant [29 x i8] c"Calling AI, please wait...\0A\00"
-@compiling_msg = private constant [21 x i8] c"Compiling IR...\0A\00\00\00\00\00"
-@loading_msg = private constant [18 x i8] c"Loading code...\0A\00"
-@executing_msg = private constant [15 x i8] c"Executing...\0A\00"
-@done_msg = private constant [10 x i8] c"Done.\0A\00\00\00\00"
-@error_msg = private constant [25 x i8] c"Vibe failed. Check AI.\0A\00"
+@prompt_str = private constant [16 x i8] c"irvibeos vibe> \00"
+@intent_prompt = private constant [15 x i8] c"Enter intent: \00"
+@generating_msg = private constant [27 x i8] c"Calling AI, please wait...\0A"
+@compiling_msg = private constant [17 x i8] c"Compiling IR...\0A\00"
+@loading_msg = private constant [17 x i8] c"Loading code...\0A\00"
+@executing_msg = private constant [14 x i8] c"Executing...\0A\00"
+@done_msg = private constant [7 x i8] c"Done.\0A\00"
+@error_msg = private constant [24 x i8] c"Vibe failed. Check AI.\0A\00"
 
-@openai_url = private constant [45 x i8] c"https://api.openai.com/v1/chat/completions\00\00"
-@claude_url = private constant [42 x i8] c"https://api.anthropic.com/v1/messages\00\00\00\00\00"
+@openai_url = private constant [43 x i8] c"https://api.openai.com/v1/chat/completions\00"
+@claude_url = private constant [38 x i8] c"https://api.anthropic.com/v1/messages\00"
 
-@system_prompt_ir = private constant [512 x i8] c"You are an LLVM IR code generator for IRVibeOS. Generate valid LLVM IR (.ll format) that implements the user's intent. Rules: Use opaque pointers (ptr not i8*). Declare external functions needed. Entry point: define i32 @main(). Output ONLY the IR code, no markdown, no explanations.\00\00\00\00\00\00\00"
-@system_prompt_binary = private constant [512 x i8] c"You are a machine code generator for IRVibeOS on %s architecture. Generate EXECUTABLE MACHINE CODE (base64-encoded) that implements the user's intent. Output ONLY JSON: {\"binary\":\"<base64>\"}. No markdown, no explanations. The code must be position-independent and ready to execute.\00\00\00\00\00\00\00"
+@system_prompt_ir = private constant [284 x i8] c"You are an LLVM IR code generator for IRVibeOS. Generate valid LLVM IR (.ll format) that implements the user's intent. Rules: Use opaque pointers (ptr not i8*). Declare external functions needed. Entry point: define i32 @main(). Output ONLY the IR code, no markdown, no explanations.\00"
+@system_prompt_binary = private constant [282 x i8] c"You are a machine code generator for IRVibeOS on %s architecture. Generate EXECUTABLE MACHINE CODE (base64-encoded) that implements the user's intent. Output ONLY JSON: {\22binary\22:\22<base64>\22}. No markdown, no explanations. The code must be position-independent and ready to execute.\00"
 
 ; Vibe main entry / Vibe 主入口
 define i32 @vibe_loop() {
@@ -95,18 +95,20 @@ check_tier:
 decode_binary:
   ; Tier1: decode base64 binary / Tier1：解码 base64 二进制
   call void @display_text(ptr @loading_msg)
-  %native_len = call i32 @base64_decode(ptr %resp_buf, i32 %code_len, ptr %native_buf, i32 8192)
-  %decode_ok = icmp sgt i32 %native_len, 0
+  %native_len_decoded = call i32 @base64_decode(ptr %resp_buf, i32 %code_len, ptr %native_buf, i32 8192)
+  %decode_ok = icmp sgt i32 %native_len_decoded, 0
   br i1 %decode_ok, label %execute, label %error
 
 compile_ir:
   ; Tier2+: compile IR locally / Tier2+：本地编译 IR
   call void @display_text(ptr @compiling_msg)
-  %compiled_len = call i32 @compile_ir_local(ptr %resp_buf, i32 %code_len, ptr %native_buf, i32 8192)
-  %compile_ok = icmp sgt i32 %compiled_len, 0
+  %native_len_compiled = call i32 @compile_ir_local(ptr %resp_buf, i32 %code_len, ptr %native_buf, i32 8192)
+  %compile_ok = icmp sgt i32 %native_len_compiled, 0
   br i1 %compile_ok, label %execute, label %error
 
 execute:
+  ; Merge native_len from both paths / 合并两个路径的 native_len
+  %native_len = phi i32 [ %native_len_decoded, %decode_binary ], [ %native_len_compiled, %compile_ir ]
   ; Allocate executable memory / 分配可执行内存
   %exec_mem = call ptr @alloc_exec(i32 %native_len)
   %exec_ok = icmp ne ptr %exec_mem, null
@@ -118,7 +120,7 @@ copy_and_run:
 
   ; Execute / 执行
   call void @display_text(ptr @executing_msg)
-  %result = call i32 ptr %exec_mem()
+  %result = call i32 %exec_mem()
 
   ; Cleanup / 清理
   call void @free_exec(ptr %exec_mem)
@@ -329,48 +331,10 @@ done:
   ret void
 }
 
-define void @set_compiler_url(ptr %url) {
-  call void @strcpy(ptr @compiler_url, ptr %url)
-  ret void
-}
-
 define void @set_target_arch(ptr %arch) {
   call void @strcpy(ptr @target_arch, ptr %arch)
   ret void
 }
-
-; Cloud compilation wrapper / 云编译包装器
-; For tier1 devices: sends IR to cloud service
-; For tier2 devices: can call local llc instead
-; tier1 设备：将 IR 发送到云服务
-; tier2 设备：可改为调用本地 llc
-define i32 @compile_ir_cloud(ptr %ir_text, i32 %ir_len, ptr %out_buf, i32 %out_size) {
-entry:
-  %json_buf = alloca [32768 x i8]
-  %resp_buf = alloca [65536 x i8]
-
-  ; Build JSON request: {"target":"<arch>","ir":"<ir_text>"}
-  ; 构建 JSON 请求：{"target":"<arch>","ir":"<ir_text>"}
-  ; Note: This is simplified - production needs proper JSON string escaping
-  ; 注意：这是简化版 - 生产需要适当的 JSON 字符串转义
-  call void @build_compile_request(ptr @target_arch, ptr %ir_text, i32 %ir_len, ptr %json_buf, i32 32768)
-
-  ; HTTP POST to cloud compiler / HTTP POST 到云编译器
-  %status = call i32 @http_post(ptr @compiler_url, ptr @compile_json_headers, ptr %json_buf, ptr %resp_buf, i32 65536)
-  %ok = icmp eq i32 %status, 200
-  br i1 %ok, label %parse, label %fail
-
-parse:
-  ; Extract binary field from JSON and decode base64
-  ; 从 JSON 提取 binary 字段并解码 base64
-  %len = call i32 @extract_and_decode_binary(ptr %resp_buf, ptr %out_buf, i32 %out_size)
-  ret i32 %len
-
-fail:
-  ret i32 -1
-}
-
-@compile_json_headers = private constant [50 x i8] c"Content-Type: application/json\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00"
 
 ; Stub implementations for JSON building and parsing
 ; These require full implementation with proper escaping and parsing
