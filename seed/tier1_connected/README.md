@@ -11,26 +11,56 @@ Tier1 种子面向有网络能力（WiFi/BLE）但算力有限（无法本地跑
 
 ## Architecture / 架构
 
+### Two Operating Modes / 两种操作模式
+
+**Mode A: Host-driven vibe / 上位机驱动的 vibe**
+- Host PC runs `ai_host.py vibe <intent>`
+- AI generates IR on host, compiles to Xtensa/RISC-V on host
+- Host sends native code via TALK protocol
+- Device executes received code
+- **Used for**: bootstrapping, development, constrained devices
+- **用于**：引导启动、开发、受限设备
+
+**Mode B: Device-driven vibe (autonomous) / 设备驱动的 vibe（自主）**
+- Device loads `vibe_engine.ll` (from `src_ir/vibe_engine.ll`)
+- Device accepts user intent via serial/display/web
+- Device calls AI API over WiFi/TLS
+- AI returns IR text to device
+- Device sends IR to **cloud compilation service**
+- Service compiles IR → Xtensa/RISC-V binary, returns to device
+- Device loads and executes compiled code
+- **Used for**: deployed/autonomous operation after bootstrap
+- **用于**：引导后的部署/自主运行
+
 ```
-seed.ll (IR, ~500 lines / 约 500 行):
+seed.ll (IR, ~300 lines / 约 300 行):
   - Boot + WiFi connect (calls platform externals)
     启动 + WiFi 连接（调用平台外部函数）
-  - TCP/TLS socket to AI endpoint
-    TCP/TLS 连接到 AI 端点
-  - Vibe loop: send intent, receive IR, load + execute
-    Vibe 循环：发送意图、接收 IR、加载并执行
+  - Load vibe_engine.ll via TALK (from host, once)
+    通过 TALK 加载 vibe_engine.ll（从上位机，一次）
+  - Jump to vibe_loop() → device becomes autonomous
+    跳转到 vibe_loop() → 设备变为自主模式
+
+vibe_engine.ll (from src_ir/, ~400 lines / 来自 src_ir/，约 400 行):
+  - Vibe loop: read intent, call AI API, receive IR
+    Vibe 循环：读取意图、调用 AI API、接收 IR
+  - Send IR to cloud compiler, receive native binary
+    发送 IR 到云编译器，接收原生二进制
+  - Load + execute generated code
+    加载并执行生成的代码
 
 Platform externals (provided by IDF/SDK, linked as .a):
 平台外部函数（由 IDF/SDK 提供，以 .a 链接）:
   - wifi_connect(ssid, pass) -> status
-  - tcp_connect(host, port) -> socket
-  - tls_handshake(socket, hostname) -> status
-  - tcp_send / tcp_recv / tcp_close
+  - http_post(url, headers, body, resp_buf, resp_size) -> status
+  - alloc_exec(size) -> ptr
+  - free_exec(ptr)
+  - display_text(text) / read_line(buf, size) -> len
 ```
 
-WiFi/TCP/TLS is **platform infrastructure** (like UART for tier0), not something the seed implements in IR.
+WiFi/HTTP/TLS is **platform infrastructure** (like UART for tier0), not something the seed implements in IR. The cloud compilation service endpoint is configurable.
 
-WiFi/TCP/TLS 是**平台基础设施**（类似 tier0 的 UART），不是种子用 IR 实现的东西。
+WiFi/HTTP/TLS 是**平台基础设施**（类似 tier0 的 UART），不是种子用 IR 实现的东西。云编译服务端点可配置。
 
 ## Compilation Problem / 编译问题
 

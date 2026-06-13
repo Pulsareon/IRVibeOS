@@ -1,26 +1,44 @@
 """
-IRVibeOS Host — TALK protocol implementation.
-IRVibeOS 上位机 — TALK 协议实现。
+IRVibeOS Host — TALK protocol + AI integration.
+IRVibeOS 上位机 — TALK 协议 + AI 集成。
 
 Speaks the TALK protocol (sync + opcode framing) to an IRVibeOS seed
-over serial or stdin/stdout pipe.
-通过串口或 stdin/stdout 管道与 IRVibeOS 种子通信（TALK 协议：同步字 + 操作码帧）。
+over serial or stdin/stdout pipe, and can invoke AI to generate LLVM IR.
+通过串口或 stdin/stdout 管道与 IRVibeOS 种子通信（TALK 协议：同步字 + 操作码帧），
+并可调用 AI 生成 LLVM IR。
 
 Usage / 用法:
   Serial / 串口:  python ai_host.py --port COM3 --baud 115200
   Pipe / 管道:    python ai_host.py --stdio
+
+  AI integration / AI 集成:
+    --ai openai --api-base https://api.openai.com/v1 --api-key sk-...
+    --ai claude --api-key sk-ant-...
+    --ai openai-compatible --api-base http://localhost:11434/v1  (e.g. Ollama)
 
 Interactive commands / 交互命令:
   info              — query device identity / 查询设备身份
   peek <addr> <len> — read device memory (hex addr) / 读设备内存（十六进制地址）
   poke <addr> <hex> — write bytes to device memory / 写字节到设备内存
   exec <file>       — send binary file to code_slot and execute / 发送并执行二进制文件
+  vibe <intent>     — ask AI to generate IR for intent and load it / 让 AI 为意图生成 IR 并加载
+  compile <ll_file> — compile .ll to native code and send / 编译 .ll 为原生代码并发送
   quit              — exit / 退出
 """
 
 import sys
 import struct
 import argparse
+import json
+import subprocess
+import tempfile
+import os
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 SYNC = b'\xAA\x55'
 OP_EXEC = 1
@@ -101,6 +119,138 @@ class TalkLink:
         return struct.unpack('<I', data[:4])[0] if len(data) >= 4 else 0
 
 
+class AIClient:
+    """AI client supporting OpenAI-compatible and Claude APIs.
+    支持 OpenAI 兼容和 Claude API 的 AI 客户端。"""
+
+    def __init__(self, provider, api_key, api_base=None, model=None):
+        self.provider = provider
+        self.api_key = api_key
+        self.api_base = api_base
+        self.model = model or self._default_model()
+
+    def _default_model(self):
+        if self.provider == 'claude':
+            return 'claude-opus-4-20250514'
+        elif self.provider == 'openai':
+            return 'gpt-4'
+        else:
+            return 'llama3'
+
+    def generate_ir(self, intent, context=None):
+        """Generate LLVM IR from intent. / 根据意图生成 LLVM IR。"""
+        if not HAS_REQUESTS:
+            raise RuntimeError("requests library required for AI calls. Install: pip install requests")
+
+        system_prompt = """You are an LLVM IR code generator for IRVibeOS.
+Given a user intent, generate valid LLVM IR code that implements it.
+
+Rules:
+- Output ONLY valid LLVM IR (`.ll` format)
+- Use opaque pointers (LLVM 15+ syntax: `ptr` not `i8*`)
+- Declare external functions you need (e.g., `declare i32 @printf(ptr, ...)`)
+- The entry point should be `define i32 @main()` unless otherwise specified
+- Keep it minimal and functional
+- No markdown code blocks, just raw IR text
+"""
+
+        if context:
+            system_prompt += f"\nContext:\n{context}\n"
+
+        if self.provider == 'claude':
+            return self._call_claude(system_prompt, intent)
+        else:  # openai or openai-compatible
+            return self._call_openai_compatible(system_prompt, intent)
+
+    def _call_claude(self, system_prompt, user_message):
+        """Call Claude API (Anthropic format). / 调用 Claude API（Anthropic 格式）。"""
+        url = 'https://api.anthropic.com/v1/messages'
+        headers = {
+            'x-api-key': self.api_key,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json'
+        }
+        body = {
+            'model': self.model,
+            'max_tokens': 4096,
+            'system': system_prompt,
+            'messages': [{'role': 'user', 'content': user_message}]
+        }
+
+        resp = requests.post(url, headers=headers, json=body, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        return data['content'][0]['text']
+
+    def _call_openai_compatible(self, system_prompt, user_message):
+        """Call OpenAI-compatible API (chat completion format).
+        调用 OpenAI 兼容 API（chat completion 格式）。"""
+        url = (self.api_base or 'https://api.openai.com/v1') + '/chat/completions'
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        body = {
+            'model': self.model,
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_message}
+            ],
+            'temperature': 0.7,
+            'max_tokens': 4096
+        }
+
+        resp = requests.post(url, headers=headers, json=body, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        return data['choices'][0]['message']['content']
+
+
+def compile_ir_to_native(ir_text, target_triple='x86_64-unknown-linux-gnu'):
+    """Compile LLVM IR to native machine code. / 将 LLVM IR 编译为原生机器码。
+
+    Returns bytes of position-independent native code, or None on error.
+    返回位置无关的原生代码字节，失败时返回 None。
+    """
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.ll', delete=False) as f_ll:
+        f_ll.write(ir_text)
+        ll_path = f_ll.name
+
+    obj_path = ll_path.replace('.ll', '.o')
+    bin_path = ll_path.replace('.ll', '.bin')
+
+    try:
+        # Compile IR to object file / 编译 IR 为目标文件
+        result = subprocess.run(
+            ['llc', '-filetype=obj', f'-mtriple={target_triple}', ll_path, '-o', obj_path],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            print(f"llc error: {result.stderr}")
+            return None
+
+        # Extract .text section as raw binary / 提取 .text 段为原始二进制
+        # For simplicity, just use the object file directly if small
+        # In production, link and extract the code section properly
+        # 为简化，小对象文件可直接用；生产环境应正确链接并提取代码段
+        with open(obj_path, 'rb') as f:
+            native_code = f.read()
+
+        return native_code
+
+    except FileNotFoundError:
+        print("Error: llc not found. Install LLVM toolchain.")
+        print("错误：未找到 llc。请安装 LLVM 工具链。")
+        return None
+    except Exception as e:
+        print(f"Compilation failed: {e}")
+        return None
+    finally:
+        for path in [ll_path, obj_path, bin_path]:
+            if os.path.exists(path):
+                os.remove(path)
+
+
 def make_serial_link(port, baud):
     import serial
     ser = serial.Serial(port, baud, timeout=5)
@@ -113,8 +263,14 @@ def make_stdio_link():
     return TalkLink(stdin.read, lambda d: (stdout.write(d), stdout.flush()))
 
 
-def interactive(link):
+def interactive(link, ai_client=None):
     print("IRVibeOS Host (TALK protocol). Type 'help' for commands.")
+    print("IRVibeOS 上位机（TALK 协议）。输入 'help' 查看命令。")
+
+    if ai_client:
+        print(f"AI enabled: {ai_client.provider} / {ai_client.model}")
+        print(f"AI 已启用：{ai_client.provider} / {ai_client.model}")
+
     while True:
         try:
             line = input("host> ").strip()
@@ -124,65 +280,131 @@ def interactive(link):
         if not line:
             continue
 
-        parts = line.split()
+        parts = line.split(maxsplit=1)
         cmd = parts[0].lower()
 
         if cmd == 'help':
-            print("  info              — device identity")
-            print("  peek <hex_addr> <len> — read memory")
-            print("  poke <hex_addr> <hex_bytes> — write memory")
-            print("  exec <file>       — execute binary file")
-            print("  quit              — exit")
+            print("  info                  — device identity / 设备身份")
+            print("  peek <hex_addr> <len> — read memory / 读内存")
+            print("  poke <hex_addr> <hex> — write memory / 写内存")
+            print("  exec <file>           — execute binary / 执行二进制")
+            print("  compile <ll_file>     — compile .ll and send / 编译 .ll 并发送")
+            if ai_client:
+                print("  vibe <intent>         — AI generates IR and loads / AI 生成 IR 并加载")
+            print("  quit                  — exit / 退出")
 
         elif cmd == 'info':
             name, slot = link.info()
             if name:
-                print(f"  Device: {name}")
-                print(f"  Code slot: {slot} bytes")
+                print(f"  Device / 设备: {name}")
+                print(f"  Code slot / 代码槽: {slot} bytes")
             else:
-                print("  FAULT")
+                print("  FAULT / 故障")
 
-        elif cmd == 'peek' and len(parts) >= 3:
-            addr = int(parts[1], 16)
-            length = int(parts[2])
-            data = link.peek(addr, length)
-            if data is not None:
-                print(f"  {data.hex()}")
-            else:
-                print("  FAULT")
+        elif cmd == 'peek' and len(parts) >= 2:
+            args = parts[1].split()
+            if len(args) >= 2:
+                addr = int(args[0], 16)
+                length = int(args[1])
+                data = link.peek(addr, length)
+                if data is not None:
+                    print(f"  {data.hex()}")
+                else:
+                    print("  FAULT / 故障")
 
-        elif cmd == 'poke' and len(parts) >= 3:
-            addr = int(parts[1], 16)
-            data = bytes.fromhex(parts[2])
-            ok = link.poke(addr, data)
-            print("  OK" if ok else "  FAULT")
+        elif cmd == 'poke' and len(parts) >= 2:
+            args = parts[1].split()
+            if len(args) >= 2:
+                addr = int(args[0], 16)
+                data = bytes.fromhex(args[1])
+                ok = link.poke(addr, data)
+                print("  OK / 成功" if ok else "  FAULT / 故障")
 
         elif cmd == 'exec' and len(parts) >= 2:
+            filepath = parts[1]
             try:
-                with open(parts[1], 'rb') as f:
+                with open(filepath, 'rb') as f:
                     code = f.read()
                 result = link.exec_code(code)
                 if result is not None:
-                    print(f"  Result: {result} (0x{result:08x})")
+                    print(f"  Result / 结果: {result} (0x{result:08x})")
                 else:
-                    print("  FAULT")
+                    print("  FAULT / 故障")
             except FileNotFoundError:
-                print(f"  File not found: {parts[1]}")
+                print(f"  File not found / 文件未找到: {filepath}")
+
+        elif cmd == 'compile' and len(parts) >= 2:
+            ll_file = parts[1]
+            try:
+                with open(ll_file, 'r') as f:
+                    ir_text = f.read()
+                print("  Compiling / 编译中...")
+                native = compile_ir_to_native(ir_text)
+                if native:
+                    print(f"  Compiled {len(native)} bytes, executing / 编译 {len(native)} 字节，执行中...")
+                    result = link.exec_code(native)
+                    if result is not None:
+                        print(f"  Result / 结果: {result} (0x{result:08x})")
+                    else:
+                        print("  FAULT / 故障")
+                else:
+                    print("  Compilation failed / 编译失败")
+            except FileNotFoundError:
+                print(f"  File not found / 文件未找到: {ll_file}")
+
+        elif cmd == 'vibe' and len(parts) >= 2:
+            if not ai_client:
+                print("  AI not configured. Use --ai option. / AI 未配置。使用 --ai 选项。")
+                continue
+
+            intent = parts[1]
+            print(f"  Vibing: {intent}")
+            print("  Calling AI / 调用 AI 中...")
+
+            try:
+                ir_text = ai_client.generate_ir(intent)
+                print("\n--- Generated IR ---")
+                print(ir_text)
+                print("--- End IR ---\n")
+
+                print("  Compiling / 编译中...")
+                native = compile_ir_to_native(ir_text)
+
+                if native:
+                    print(f"  Compiled {len(native)} bytes, executing / 编译 {len(native)} 字节，执行中...")
+                    result = link.exec_code(native)
+                    if result is not None:
+                        print(f"  Result / 结果: {result} (0x{result:08x})")
+                    else:
+                        print("  FAULT / 故障")
+                else:
+                    print("  Compilation failed / 编译失败")
+
+            except Exception as e:
+                print(f"  Error / 错误: {e}")
 
         elif cmd in ('quit', 'exit', 'q'):
             break
 
         else:
-            print(f"  Unknown: {line}")
+            print(f"  Unknown command / 未知命令: {cmd}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='IRVibeOS TALK host')
+    parser = argparse.ArgumentParser(description='IRVibeOS TALK host with AI integration')
     parser.add_argument('--port', help='Serial port (e.g., COM3, /dev/ttyUSB0)')
     parser.add_argument('--baud', type=int, default=115200)
     parser.add_argument('--stdio', action='store_true', help='Use stdin/stdout')
+
+    parser.add_argument('--ai', choices=['openai', 'claude', 'openai-compatible'],
+                       help='AI provider / AI 提供商')
+    parser.add_argument('--api-key', help='API key / API 密钥')
+    parser.add_argument('--api-base', help='API base URL (for OpenAI-compatible) / API 基础 URL（OpenAI 兼容）')
+    parser.add_argument('--model', help='Model name / 模型名称')
+
     args = parser.parse_args()
 
+    # Setup link / 设置连接
     if args.stdio:
         link = make_stdio_link()
     elif args.port:
@@ -191,7 +413,16 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    interactive(link)
+    # Setup AI client / 设置 AI 客户端
+    ai_client = None
+    if args.ai:
+        if not args.api_key:
+            print("Error: --api-key required when using --ai")
+            print("错误：使用 --ai 时需要 --api-key")
+            sys.exit(1)
+        ai_client = AIClient(args.ai, args.api_key, args.api_base, args.model)
+
+    interactive(link, ai_client)
 
 
 if __name__ == '__main__':

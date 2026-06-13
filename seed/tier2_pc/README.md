@@ -11,6 +11,26 @@ Tier2 种子是一个 UEFI 应用。UEFI Boot Services 已经提供了显示（G
 
 ## Architecture / 架构
 
+### Two Operating Modes / 两种操作模式
+
+**Mode A: Host-driven vibe (development) / 上位机驱动的 vibe（开发）**
+- Another PC runs `ai_host.py vibe <intent>`
+- AI generates IR, compiles to x86-64/ARM64
+- Host sends native code via network or serial TALK protocol
+- Device executes received code
+- **Used for**: initial bootstrap, cross-platform development
+- **用于**：初始引导、跨平台开发
+
+**Mode B: Device-driven vibe (autonomous) / 设备驱动的 vibe（自主）**
+- Device loads `vibe_engine.ll` + LLVM toolchain (once, via Mode A or EFI partition)
+- Device accepts user intent via GOP display + keyboard
+- Device calls AI API over TCP/TLS (UEFI protocols)
+- AI returns IR text to device
+- Device compiles IR **locally** using `llc` or ORC JIT
+- Device loads and executes compiled code
+- **Used for**: standalone operation, no external dependencies
+- **用于**：独立运行，无外部依赖
+
 ```
 seed.ll (IR, ~300-400 lines / 约 300-400 行):
   - efi_main(ImageHandle, SystemTable) entry point
@@ -19,10 +39,18 @@ seed.ll (IR, ~300-400 lines / 约 300-400 行):
     LocateProtocol 获取 GOP、键盘、TCP4
   - Basic text output to framebuffer (built-in bitmap font)
     帧缓冲基本文本输出（内置位图字体）
-  - TCP connection to AI endpoint (or local LLM socket)
-    TCP 连接到 AI 端点（或本地 LLM socket）
-  - Vibe loop: display prompt, read intent, send to AI, receive IR, compile, load
-    Vibe 循环：显示提示符、读取意图、发送给 AI、接收 IR、编译、加载
+  - Load vibe_engine.ll from EFI partition or receive via network
+    从 EFI 分区加载 vibe_engine.ll 或通过网络接收
+  - Jump to vibe_loop() → device becomes autonomous
+    跳转到 vibe_loop() → 设备变为自主模式
+
+vibe_engine.ll (from src_ir/, ~400 lines / 来自 src_ir/，约 400 行):
+  - Vibe loop: display prompt, read intent, call AI API, receive IR
+    Vibe 循环：显示提示符、读取意图、调用 AI API、接收 IR
+  - Compile IR locally (call llc binary or invoke ORC JIT)
+    本地编译 IR（调用 llc 二进制或调用 ORC JIT）
+  - Load + execute generated code
+    加载并执行生成的代码
 
 Platform externals (UEFI protocols, resolved at link time):
 平台外部函数（UEFI 协议，链接时解析）:
@@ -30,6 +58,7 @@ Platform externals (UEFI protocols, resolved at link time):
   - SimpleTextInput: ReadKeyStroke for keyboard / 键盘读取
   - TCP4: connect, send, receive for AI communication / AI 通信
   - AllocatePages: executable memory for loaded modules / 可执行内存分配
+  - SimpleFileSystem: read LLVM tools from EFI partition / 从 EFI 分区读取 LLVM 工具
 ```
 
 ## TLS Strategy / TLS 策略
