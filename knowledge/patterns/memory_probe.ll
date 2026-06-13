@@ -1,13 +1,20 @@
 ; Pattern: RAM boundary probing
+; 模式：RAM 边界探测
 ;
 ; Strategy: write a known value to an address, read it back.
+; 策略：向地址写入已知值，再读回来比较。
 ; If the readback matches, that address is valid RAM.
+; 如果读回值匹配，则该地址是有效 RAM。
 ; Binary search to find the upper boundary.
+; 可用二分法找到上边界。
 ;
-; This is useful when the AI doesn't know how much RAM a device has.
+; Useful when AI doesn't know device RAM size.
+; 当 AI 不知道设备 RAM 大小时使用。
 ; Start from a known base (e.g., 0x20000000 on Cortex-M) and probe upward.
+; 从已知基地址开始（如 Cortex-M 的 0x20000000）向上探测。
 
 ; Probe a single address: returns 1 if writable RAM, 0 if not
+; 探测单个地址：可写 RAM 返回 1，否则返回 0
 define i32 @probe_address(i64 %addr) {
 entry:
   %ptr = inttoptr i64 %addr to ptr
@@ -21,7 +28,9 @@ entry:
 }
 
 ; Find the end of RAM starting from base_addr, stepping by step_size.
+; 从 base_addr 开始，以 step_size 为步长，找到 RAM 末尾。
 ; Returns the last valid address found.
+; 返回找到的最后一个有效地址。
 define i64 @find_ram_end(i64 %base_addr, i64 %step_size) {
 entry:
   br label %loop

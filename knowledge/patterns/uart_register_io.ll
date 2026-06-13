@@ -1,14 +1,21 @@
 ; Pattern: UART register I/O (ARM Cortex-M style)
+; 模式：UART 寄存器 I/O（ARM Cortex-M 风格）
 ;
 ; Most ARM MCUs have memory-mapped UART registers.
-; Typical structure:
+; 大多数 ARM MCU 使用内存映射的 UART 寄存器。
+;
+; Typical structure / 典型结构:
 ;   BASE + 0x00 = Data Register (DR) — read to receive, write to send
+;                  数据寄存器 — 读取接收，写入发送
 ;   BASE + 0x04 = Status Register (SR) — check TX empty / RX ready flags
+;                  状态寄存器 — 检查发送空/接收就绪标志
 ;
 ; This pattern shows the general approach. Actual addresses vary by chip.
+; 此模式展示通用方法。实际地址因芯片而异。
 
-; Example for a hypothetical UART at base 0x40004400:
-; SR bit 7 = TX empty, SR bit 5 = RX not empty
+; Example: hypothetical UART at base 0x40004400
+; 示例：假设 UART 基地址 0x40004400
+; SR bit 7 = TX empty / 发送空, SR bit 5 = RX not empty / 接收非空
 
 define void @uart_send_byte(i8 %byte) {
 entry:

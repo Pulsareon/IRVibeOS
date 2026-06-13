@@ -1,44 +1,51 @@
 ; IRVibeOS Seed — platform-independent main loop.
+; IRVibeOS 种子 — 平台无关主循环。
+;
 ; This is the irreducible kernel. It receives code, places it, and jumps to it.
+; 这是不可再减的内核。它接收代码、放入内存、跳转执行。
 ;
-; Platform must provide:
-;   @seed_recv_byte() -> i8
-;   @seed_send_byte(i8) -> void
+; Platform must provide / 平台必须实现:
+;   @seed_recv_byte() -> i8    ; receive one byte / 接收一个字节
+;   @seed_send_byte(i8) -> void ; send one byte / 发送一个字节
 ;
-; Protocol (TALK):
+; Protocol (TALK) / 协议:
 ;   Each message framed by sync word 0xAA 0x55.
-;   Opcodes:
-;     0x01 = EXEC  [4B len][payload]        → execute as () -> i32, return result
-;     0x02 = PEEK  [8B addr][4B len]        → read memory, send back
-;     0x03 = POKE  [8B addr][4B len][data]  → write to memory
-;     0x04 = INFO  []                       → return device descriptor + slot size
+;   每条消息以同步字 0xAA 0x55 开头。
 ;
-;   Response: [0xAA 0x55][1B status][4B len][data]
-;     status 0x00 = OK
-;     status 0xFE = unknown opcode
+;   Opcodes / 操作码:
+;     0x01 = EXEC  [4B len][payload]        → execute as () -> i32 / 执行并返回 i32
+;     0x02 = PEEK  [8B addr][4B len]        → read memory / 读内存
+;     0x03 = POKE  [8B addr][4B len][data]  → write memory / 写内存
+;     0x04 = INFO  []                       → device descriptor / 设备描述
 ;
-;   If bytes arrive out of sync, receiver scans for next 0xAA 0x55.
+;   Response / 响应: [0xAA 0x55][1B status][4B len][data]
+;     status 0x00 = OK / 成功
+;     status 0xFE = unknown opcode / 未知操作码
+;
+;   On desync, receiver scans for next 0xAA 0x55.
+;   失步时，接收方扫描下一个 0xAA 0x55。
 
-; --- Executable memory slot ---
-; Size is conservative for small MCUs. Override via platform-specific link.
+; --- Executable memory slot / 可执行内存槽 ---
+; Size conservative for small MCUs; override via platform link.
+; 大小保守适配小型 MCU；可通过平台链接覆盖。
 @code_slot = global [4096 x i8] zeroinitializer, align 16
 @code_slot_size = weak global i32 4096
 
-; Device identity (override per platform)
+; Device identity (override per platform) / 设备标识（各平台可覆盖）
 @device_info = weak global [32 x i8] c"irvibeos-seed-generic\00\00\00\00\00\00\00\00\00\00\00"
 
-; --- Platform I/O ---
+; --- Platform I/O / 平台 I/O ---
 declare i8   @seed_recv_byte()
 declare void @seed_send_byte(i8)
 
-; --- LLVM intrinsic: flush I-cache after writing code ---
+; --- LLVM intrinsic: flush I-cache / 刷新指令缓存 ---
 declare void @llvm.clear_cache(ptr, ptr)
 
 define i32 @main() {
 entry:
   br label %sync
 
-; === Sync: scan for 0xAA 0x55 ===
+; Scan for sync word 0xAA 0x55 / 扫描同步字
 sync:
   %s0 = call i8 @seed_recv_byte()
   %is_aa = icmp eq i8 %s0, -86          ; 0xAA
@@ -49,7 +56,7 @@ sync_55:
   %is_55 = icmp eq i8 %s1, 85           ; 0x55
   br i1 %is_55, label %dispatch, label %sync
 
-; === Read opcode and dispatch ===
+; Read opcode and dispatch / 读取操作码并分派
 dispatch:
   %opcode = call i8 @seed_recv_byte()
   switch i8 %opcode, label %unknown [
@@ -59,29 +66,29 @@ dispatch:
     i8 4, label %do_info
   ]
 
-; === EXEC: receive code, flush cache, call ===
+; EXEC: receive code, flush cache, call / 接收代码、刷缓存、调用
 do_exec:
   %exec_len = call i32 @recv_u32()
-  ; Clamp length to code_slot capacity
+  ; Clamp to slot capacity / 钳位到槽容量
   %slot_cap = load i32, ptr @code_slot_size
   %len_ok = icmp ule i32 %exec_len, %slot_cap
   %safe_len = select i1 %len_ok, i32 %exec_len, i32 %slot_cap
-  ; Receive with volatile stores (prevent optimizer elimination)
+  ; Volatile stores prevent optimizer elimination / volatile 写入防止优化器消除
   call void @recv_bytes_volatile(ptr @code_slot, i32 %safe_len)
-  ; Memory barrier + I-cache invalidation
+  ; Memory barrier + I-cache invalidation / 内存屏障 + 指令缓存失效
   fence seq_cst
   %slot_end = getelementptr i8, ptr @code_slot, i32 %safe_len
   call void @llvm.clear_cache(ptr @code_slot, ptr %slot_end)
-  ; Execute
+  ; Execute / 执行
   %result = call i32 ptr @code_slot()
-  ; Reply
+  ; Reply / 回复
   call void @send_sync()
   call void @seed_send_byte(i8 0)
   call void @send_u32(i32 4)
   call void @send_u32(i32 %result)
   br label %sync
 
-; === PEEK: read memory ===
+; PEEK: read memory / 读内存
 do_peek:
   %peek_addr = call i64 @recv_u64()
   %peek_len = call i32 @recv_u32()
@@ -92,7 +99,7 @@ do_peek:
   call void @send_bytes(ptr %peek_ptr, i32 %peek_len)
   br label %sync
 
-; === POKE: write memory ===
+; POKE: write memory / 写内存
 do_poke:
   %poke_addr = call i64 @recv_u64()
   %poke_len = call i32 @recv_u32()
@@ -103,7 +110,7 @@ do_poke:
   call void @send_u32(i32 0)
   br label %sync
 
-; === INFO: report identity and capabilities ===
+; INFO: report identity and capabilities / 报告设备身份和能力
 do_info:
   call void @send_sync()
   call void @seed_send_byte(i8 0)
@@ -113,7 +120,7 @@ do_info:
   call void @send_u32(i32 %info_cap)
   br label %sync
 
-; === Unknown opcode ===
+; Unknown opcode / 未知操作码
 unknown:
   call void @send_sync()
   call void @seed_send_byte(i8 -2)       ; 0xFE
@@ -122,9 +129,10 @@ unknown:
 }
 
 ; ============================================================
-; Helpers
+; Helpers / 辅助函数
 ; ============================================================
 
+; Send sync word / 发送同步字
 define void @send_sync() {
 entry:
   call void @seed_send_byte(i8 -86)      ; 0xAA
@@ -132,6 +140,7 @@ entry:
   ret void
 }
 
+; Receive little-endian u32 / 接收小端序 u32
 define i32 @recv_u32() {
 entry:
   %b0 = call i8 @seed_recv_byte()
@@ -151,6 +160,7 @@ entry:
   ret i32 %r3
 }
 
+; Receive little-endian u64 / 接收小端序 u64
 define i64 @recv_u64() {
 entry:
   %lo = call i32 @recv_u32()
@@ -162,6 +172,7 @@ entry:
   ret i64 %val
 }
 
+; Send little-endian u32 / 发送小端序 u32
 define void @send_u32(i32 %val) {
 entry:
   %b0 = trunc i32 %val to i8
@@ -178,7 +189,7 @@ entry:
   ret void
 }
 
-; Receive N bytes — normal stores (for data like POKE payloads)
+; Receive N bytes — normal stores (for data) / 接收 N 字节 — 普通写入（数据用）
 define void @recv_bytes(ptr %buf, i32 %len) {
 entry:
   %has = icmp ugt i32 %len, 0
@@ -197,7 +208,7 @@ done:
   ret void
 }
 
-; Receive N bytes — volatile stores (for executable code)
+; Receive N bytes — volatile stores (for code) / 接收 N 字节 — volatile 写入（代码用）
 define void @recv_bytes_volatile(ptr %buf, i32 %len) {
 entry:
   %has = icmp ugt i32 %len, 0
@@ -216,7 +227,7 @@ done:
   ret void
 }
 
-; Send N bytes from buffer
+; Send N bytes from buffer / 从缓冲区发送 N 字节
 define void @send_bytes(ptr %buf, i32 %len) {
 entry:
   %has = icmp ugt i32 %len, 0

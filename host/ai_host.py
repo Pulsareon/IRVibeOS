@@ -1,19 +1,21 @@
 """
 IRVibeOS Host — TALK protocol implementation.
+IRVibeOS 上位机 — TALK 协议实现。
 
 Speaks the TALK protocol (sync + opcode framing) to an IRVibeOS seed
 over serial or stdin/stdout pipe.
+通过串口或 stdin/stdout 管道与 IRVibeOS 种子通信（TALK 协议：同步字 + 操作码帧）。
 
-Usage:
-  Serial:  python ai_host.py --port COM3 --baud 115200
-  Pipe:    python ai_host.py --stdio < /dev/ttyUSB0 > /dev/ttyUSB0
+Usage / 用法:
+  Serial / 串口:  python ai_host.py --port COM3 --baud 115200
+  Pipe / 管道:    python ai_host.py --stdio
 
-Interactive commands:
-  info              — query device identity
-  peek <addr> <len> — read device memory (hex addr)
-  poke <addr> <hex> — write bytes to device memory
-  exec <file>       — send binary file to code_slot and execute
-  quit              — exit
+Interactive commands / 交互命令:
+  info              — query device identity / 查询设备身份
+  peek <addr> <len> — read device memory (hex addr) / 读设备内存（十六进制地址）
+  poke <addr> <hex> — write bytes to device memory / 写字节到设备内存
+  exec <file>       — send binary file to code_slot and execute / 发送并执行二进制文件
+  quit              — exit / 退出
 """
 
 import sys
@@ -28,7 +30,8 @@ OP_INFO = 4
 
 
 class TalkLink:
-    """Framed TALK protocol over a byte stream."""
+    """Framed TALK protocol over a byte stream.
+    基于字节流的 TALK 协议帧处理。"""
 
     def __init__(self, read_fn, write_fn):
         self._read = read_fn
@@ -44,7 +47,7 @@ class TalkLink:
         return buf
 
     def _wait_sync(self):
-        """Scan for 0xAA 0x55 sync word."""
+        """Scan for 0xAA 0x55 sync word. / 扫描 0xAA 0x55 同步字。"""
         state = 0
         while True:
             b = self._recv_exact(1)
