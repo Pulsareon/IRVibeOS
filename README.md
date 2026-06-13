@@ -1,125 +1,179 @@
+**Language / 语言**: [English](README.md) | [中文](README.zh-CN.md)
+
 # IRVibeOS
 
-IRVibeOS is an experiment for an operating surface whose system source is LLVM IR.
+IRVibeOS is an operating system whose entire system source is LLVM IR. It boots from a minimal seed and grows into a full OS where the primary way to create software is **vibe** — describe your intent, get working programs.
 
-The project keeps only four built-in capabilities:
+## Core Idea
 
-- `vibe`: accept intent and require AI output to be LLVM IR before import
-- `net`: fetch data from the network
-- `rewrite`: write or replace LLVM IR modules
-- `exec`: execute LLVM IR or binaries produced from LLVM IR
+The system starts as a seed and evolves into a complete operating system. Once grown, it works like any OS — running apps, managing resources, providing UI — but with one fundamental difference: **software is created by intent, not by manual coding.**
 
-Everything else must be discovered by AI through LLVM IR, bitcode, and generated binaries.
+Users vibe:
+- **Programs** — "I need a text editor" → the system generates one
+- **Libraries** — "I need an HTTP client" → available as a dependency
+- **Services** — "Run a web server on port 8080" → running
+- **UI** — complexity scales with hardware (serial text → framebuffer → GPU-accelerated)
 
-## CLI UI
+Everything produced is LLVM IR. Everything runs natively.
 
-Run without arguments to enter the DOS/Linux-style shell:
+## How It Works
 
-```powershell
-lli src_ir\irvibeos.ll
+```
+┌─────────────────────────────────────────────────────┐
+│                  Grown IRVibeOS                       │
+│                                                      │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐             │
+│  │  App A  │  │  App B  │  │  App C  │  ← vibed   │
+│  └────┬────┘  └────┬────┘  └────┬────┘             │
+│       │            │            │                    │
+│  ┌────┴────────────┴────────────┴────┐              │
+│  │        Libraries / Deps           │  ← vibed    │
+│  └────────────────┬──────────────────┘              │
+│                   │                                  │
+│  ┌────────────────┴──────────────────┐              │
+│  │     OS Services (sched, fs, net)  │  ← grown    │
+│  └────────────────┬──────────────────┘              │
+│                   │                                  │
+│  ┌────────────────┴──────────────────┐              │
+│  │     Vibe Engine (the core loop)   │  ← seed     │
+│  │     intent → IR → verify → load   │              │
+│  └───────────────────────────────────┘              │
+└─────────────────────────────────────────────────────┘
 ```
 
-Available commands:
+The vibe engine is the one capability that must exist from seed stage onward. It is both the bootstrap mechanism (growing the OS) and the permanent user interface (creating software after the OS is grown).
 
-```text
-help      show shell commands
-apps      list dynamic IR modules under modules/
-deps      prompt for a module and print modules/<name>/deps.txt
-run       prompt for a module and execute modules/<name>/main.ll
-load      prompt for a module, show dependencies, then execute module IR
-vibe      accept intent; imported code must still be LLVM IR
-net       fetch network data into data/net.last
-rewrite   write data/generated.ll
-exec      execute data/generated.ll through lli
-boot      print core status
-exit      leave shell
+## The Seed
+
+The seed = the minimum code needed to start the vibe loop on a given hardware class.
+
+What "minimum" means varies by hardware:
+
+| Hardware | Seed provides | Vibe loop powered by |
+|----------|--------------|---------------------|
+| Weak MCU (8KB RAM) | Boot + UART I/O + execute slot | Host PC with AI pushes code over serial |
+| Connected device (ESP32) | Boot + WiFi + execute | Cloud AI, device talks directly |
+| PC / VM | UEFI app: display, keyboard, network, memory map | Local LLM or cloud AI, user interacts via keyboard/screen |
+| On existing OS | A process | Calls AI API directly, simplest case |
+
+The invariant: once the vibe loop is running, growth begins.
+
+### MCU Seed
+
+Two functions to implement: `seed_recv_byte`, `seed_send_byte`. ~256 bytes compiled.
+
+### PC Seed
+
+A UEFI application. UEFI already provides display, keyboard, memory map, network, filesystem. The seed uses these to connect to AI and enter the vibe loop immediately — no blind probing needed.
+
+### Hosted Seed
+
+A normal process using stdin/stdout. For development and testing.
+
+## TALK Protocol (MCU mode)
+
+For constrained devices communicating with a host:
+
+```
+HOST → DEVICE:
+  [1B opcode][4B length][payload]
+  opcodes: 0x01=EXEC  0x02=PEEK  0x03=POKE
+
+DEVICE → HOST:
+  [1B status][4B length][data]
 ```
 
-The shell itself is implemented in `src_ir/irvibeos.ll`.
+Capable devices (PC, ESP32) don't need this protocol — they speak HTTP/API to AI directly.
 
-## Modular Apps
+## Vibe as OS Primitive
 
-A module is a directory under `modules/`:
+Once the system has grown enough, vibe becomes the standard way to get software:
 
-```text
-modules/<name>/
-  main.ll      executable LLVM IR entry
-  deps.txt     dependency metadata
+```
+user: "I need a file manager"
+  → AI generates IR for a file manager
+  → system verifies the IR
+  → system resolves/vibes any missing dependencies
+  → app is loaded and running
+
+user: "add copy/paste support to the editor"
+  → AI reads existing editor module
+  → generates updated IR
+  → hot-reloads the module
 ```
 
-`load` is the first dynamic-loading contract. It resolves the module name at runtime, prints dependency metadata, then executes `main.ll` with `lli`.
+Vibe can produce:
+- Standalone programs (apps)
+- Shared libraries (other modules can depend on)
+- System services (daemons, drivers)
+- UI components (if display hardware exists)
 
-Current example:
+Dependencies are tracked. If app A needs lib X and lib X doesn't exist yet, the system vibes lib X first.
 
-```powershell
-lli src_ir\irvibeos.ll
-irvibeos> apps
-irvibeos> deps
-module> hello
-irvibeos> load
-module> hello
+## UI Scaling
+
+The system adapts its interface to available hardware:
+
+| Hardware | UI |
+|----------|-----|
+| UART only | text commands over serial |
+| Character LCD | minimal status display |
+| Framebuffer | terminal UI, simple graphics |
+| GPU | window manager, compositing, rich apps |
+
+UI is not pre-built — it's vibed to match what the hardware can do.
+
+## Repository as Knowledge
+
+The GitHub repository (https://github.com/Pulsareon/IRVibeOS.git) serves as AI's reference knowledge — not a package registry.
+
+- In constrained mode: the host AI reads the repo for patterns and platform notes
+- In full mode: once the device has network, its AI can fetch references from the repo
+- The AI adapts what it reads to the current device — never blindly copies
+
+## Repository Structure
+
+```
+IRVibeOS/
+  seed/                   seeds for each hardware tier
+    tier0_mcu/            weak MCU: UART byte-level seed
+    tier1_connected/      networked device: WiFi/BLE seed
+    tier2_pc/             PC/VM: UEFI application seed
+    tier3_hosted/         on existing OS: process-level seed
+
+  knowledge/              AI reference (not executed by device)
+    patterns/             general IR patterns
+    platforms/            platform notes and memory maps
+    examples/             previously grown modules
+
+  host/                   host-side tools
+    ai_host.py            communicates with seed over serial
+
+  src_ir/                 legacy hosted shell (development aid)
+    irvibeos.ll
+
+  modules/                hosted-mode IR apps
 ```
 
 ## Hard Source Rule
 
-`src_ir/` is the system source tree. It may contain only:
+All system source is LLVM IR (`.ll` or `.bc`). Other languages appear only in:
 
-- `.ll` LLVM assembly IR
-- `.bc` LLVM bitcode
-- plain metadata files that describe IR packages
+- `knowledge/` as reference for AI
+- `host/` as tooling (runs on PC, not on device)
+- `docs/` as documentation
 
-Other languages are allowed only as documentation or conversion notes under `docs/foreign_sources/`.
-They must not be imported into `src_ir/` directly, and they must not be treated as system implementation.
+The device never executes anything that wasn't generated as LLVM IR.
 
-The import path is always:
+## Quick Start (Hosted Mode)
 
-```text
-foreign-language draft or explanation
-    -> temporary compiler/frontend output
-    -> LLVM IR review
-    -> src_ir/*.ll or src_ir/*.bc
-```
-
-For C-like input, a temporary conversion can be:
+The legacy shell still works for development:
 
 ```powershell
-clang -S -emit-llvm temp\idea.c -o temp\idea.ll
+lli src_ir\irvibeos.ll
 ```
 
-Only `temp\idea.ll` can be considered for import into `src_ir/`.
+## References
 
-## Layout
-
-```text
-IRVibeOS/
-  src_ir/                 system source, LLVM IR only
-  modules/                modular IR apps and dependency metadata
-  examples/               runnable IR examples
-  docs/foreign_sources/   non-IR source kept only as documentation
-  data/                   generated modules and network output
-```
-
-## Run
-
-```powershell
-lli src_ir\irvibeos.ll boot
-lli src_ir\irvibeos.ll rewrite
-lli src_ir\irvibeos.ll exec
-lli src_ir\irvibeos.ll net
-lli src_ir\irvibeos.ll vibe
-```
-
-Validate IR:
-
-```powershell
-opt -S src_ir\irvibeos.ll -o NUL
-lli examples\hello.ll
-```
-
-## Current Seed
-
-`src_ir/irvibeos.ll` is the minimal seed. It is intentionally tiny: it delegates network and execution to host process calls for now, but the control surface itself is LLVM IR.
-
-Future work should replace those host process calls with IR-defined capability boundaries and AI-generated IR modules.
-
-Reference: LLVM Language Reference Manual: https://llvm.org/docs/LangRef.html
+- LLVM Language Reference: https://llvm.org/docs/LangRef.html
+- Repository: https://github.com/Pulsareon/IRVibeOS.git

@@ -1,7 +1,10 @@
 /data/
 /target/
 /temp/
+/build/
 *.obj
 *.exe
 *.dll
 *.pdb
+*.bc
+*.o
