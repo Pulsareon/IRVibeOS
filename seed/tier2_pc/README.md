@@ -25,11 +25,17 @@ Tier2 种子是一个 UEFI 应用。UEFI Boot Services 已经提供了显示（G
 - Device loads `vibe_engine.ll` + LLVM toolchain (once, via Mode A or EFI partition)
 - Device accepts user intent via GOP display + keyboard
 - Device calls AI API over TCP/TLS (UEFI protocols)
-- AI returns IR text to device
-- Device compiles IR **locally** using `llc` or ORC JIT
-- Device loads and executes compiled code
+- **Option 1**: AI generates x86-64 machine code directly (base64-encoded)
+  - Device decodes and loads into executable memory
+- **Option 2**: AI generates LLVM IR, device compiles locally using `llc` or ORC JIT
+  - For complex functionality where IR is more reliable than direct machine code
+- Device loads and executes generated code
 - **Used for**: standalone operation, no external dependencies
 - **用于**：独立运行，无外部依赖
+
+**Key advantage**: PC has enough resources to run LLVM toolchain locally, so both direct machine code generation and local IR compilation are viable options.
+
+**关键优势**：PC 有足够资源在本地运行 LLVM 工具链，因此直接生成机器码和本地 IR 编译两种方案都可行。
 
 ```
 seed.ll (IR, ~300-400 lines / 约 300-400 行):
@@ -45,12 +51,14 @@ seed.ll (IR, ~300-400 lines / 约 300-400 行):
     跳转到 vibe_loop() → 设备变为自主模式
 
 vibe_engine.ll (from src_ir/, ~400 lines / 来自 src_ir/，约 400 行):
-  - Vibe loop: display prompt, read intent, call AI API, receive IR
-    Vibe 循环：显示提示符、读取意图、调用 AI API、接收 IR
-  - Compile IR locally (call llc binary or invoke ORC JIT)
-    本地编译 IR（调用 llc 二进制或调用 ORC JIT）
-  - Load + execute generated code
-    加载并执行生成的代码
+  - Vibe loop: display prompt, read intent, call AI API
+    Vibe 循环：显示提示符、读取意图、调用 AI API
+  - AI generates machine code (base64) or LLVM IR
+    AI 生成机器码（base64）或 LLVM IR
+  - If machine code: decode and execute directly
+    如果是机器码：直接解码并执行
+  - If IR: compile locally using llc or ORC JIT, then execute
+    如果是 IR：使用 llc 或 ORC JIT 本地编译，然后执行
 
 Platform externals (UEFI protocols, resolved at link time):
 平台外部函数（UEFI 协议，链接时解析）:
@@ -74,15 +82,39 @@ Do not write TLS in IR from scratch. Options:
 3. Vibe the TLS module once the system is running
    系统跑起来后再 vibe 出 TLS 模块
 
-## Compilation on Device / 设备端编译
+## Code Generation / 代码生成
 
-PC has enough resources to run LLVM tools locally:
+PC has enough resources to run LLVM tools locally. Two approaches:
 
-PC 有足够资源在本地运行 LLVM 工具：
+PC 有足够资源在本地运行 LLVM 工具。两种方法：
 
-- The AI generates `.ll` text / AI 生成 `.ll` 文本
-- The seed calls `llc` + `lld` (or uses ORC JIT via libLLVM) / 调用 llc + lld（或通过 libLLVM 使用 ORC JIT）
-- Resulting native code is loaded into allocated executable pages / 编译结果加载到可执行内存页
+**Approach 1: AI generates machine code directly** (faster, simpler)
+- AI is prompted with target architecture ("x86-64" or "aarch64")
+- AI returns base64-encoded executable machine code
+- Device decodes and loads into executable pages
+- **Best for**: simple utilities, quick prototyping
+
+**方法 1：AI 直接生成机器码**（更快，更简单）
+- AI 获得目标架构提示（"x86-64" 或 "aarch64"）
+- AI 返回 base64 编码的可执行机器码
+- 设备解码并加载到可执行页
+- **适用于**：简单工具、快速原型
+
+**Approach 2: AI generates LLVM IR, device compiles locally** (more reliable for complex code)
+- AI generates LLVM IR (.ll format)
+- Device calls `llc` binary stored on EFI partition, or uses ORC JIT
+- Resulting native code is loaded into allocated executable pages
+- **Best for**: complex functionality, multi-file modules, debugging
+
+**方法 2：AI 生成 LLVM IR，设备本地编译**（复杂代码更可靠）
+- AI 生成 LLVM IR（.ll 格式）
+- 设备调用存储在 EFI 分区的 `llc` 二进制，或使用 ORC JIT
+- 编译结果加载到分配的可执行页
+- **适用于**：复杂功能、多文件模块、调试
+
+The vibe engine can support both approaches and choose based on the task complexity or user preference.
+
+Vibe 引擎可以支持两种方法，并根据任务复杂度或用户偏好选择。
 
 ## Build / 构建
 

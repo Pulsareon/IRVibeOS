@@ -4,18 +4,23 @@
 ; This module enables a networked device to vibe directly:
 ; 本模块让联网设备可以直接 vibe：
 ;   1. Accept intent from user / 从用户接收意图
-;   2. Send intent to AI API over network / 通过网络发送意图到 AI API
-;   3. Receive LLVM IR from AI / 从 AI 接收 LLVM IR
-;   4. Compile IR to native (via external compiler or JIT) / 编译 IR 为原生代码（通过外部编译器或 JIT）
-;   5. Load and execute the generated module / 加载并执行生成的模块
+;   2. Send intent + target arch to AI API / 发送意图 + 目标架构到 AI API
+;   3. AI generates ready-to-execute code for target / AI 生成目标架构的可执行代码
+;      - Tier1 (ESP32): AI generates Xtensa/RISC-V machine code (base64)
+;      - Tier2 (PC): AI generates x86-64 machine code or IR (if llc available)
+;   4. Decode and load the binary / 解码并加载二进制
+;   5. Execute / 执行
+;
+; NO cloud compilation service needed - AI generates the final binary directly
+; 无需云编译服务 - AI 直接生成最终二进制
 ;
 ; Platform dependencies (provided externally):
 ; 平台依赖（外部提供）:
 ;   Network: @http_post(url, headers, body, resp_buf, resp_size) -> status
-;   Compilation: @compile_ir(ir_text, ir_len, out_buf, out_size) -> native_len
 ;   Memory: @alloc_exec(size) -> ptr, @free_exec(ptr)
 ;   Display: @display_text(text)
 ;   Input: @read_line(buf, size) -> len
+;   Decoding: @base64_decode(src, src_len, dst, dst_size) -> len
 
 ; External platform functions / 外部平台函数
 declare i32 @http_post(ptr, ptr, ptr, ptr, i32)  ; url, headers, body, resp_buf, resp_size -> status
@@ -31,14 +36,13 @@ declare i32 @json_extract_string(ptr, ptr, ptr, i32)  ; json, key, out_buf, out_
 @api_key = global [256 x i8] zeroinitializer
 @api_base = global [256 x i8] zeroinitializer
 @model_name = global [64 x i8] zeroinitializer
-@compiler_url = global [256 x i8] zeroinitializer  ; Cloud compiler service URL / 云编译服务 URL
-@target_arch = global [32 x i8] zeroinitializer    ; Target architecture / 目标架构
+@target_arch = global [32 x i8] zeroinitializer    ; Target architecture (e.g., "xtensa", "x86-64") / 目标架构
 
 ; String constants / 字符串常量
 @prompt_str = private constant [20 x i8] c"irvibeos vibe> \00\00\00\00\00"
 @intent_prompt = private constant [18 x i8] c"Enter intent: \00\00\00\00"
 @generating_msg = private constant [29 x i8] c"Calling AI, please wait...\0A\00"
-@compiling_msg = private constant [21 x i8] c"Compiling IR...\0A\00\00\00\00\00"
+@loading_msg = private constant [18 x i8] c"Loading code...\0A\00"
 @executing_msg = private constant [15 x i8] c"Executing...\0A\00"
 @done_msg = private constant [10 x i8] c"Done.\0A\00\00\00\00"
 @error_msg = private constant [25 x i8] c"Vibe failed. Check AI.\0A\00"
@@ -46,7 +50,7 @@ declare i32 @json_extract_string(ptr, ptr, ptr, i32)  ; json, key, out_buf, out_
 @openai_url = private constant [45 x i8] c"https://api.openai.com/v1/chat/completions\00\00"
 @claude_url = private constant [42 x i8] c"https://api.anthropic.com/v1/messages\00\00\00\00\00"
 
-@system_prompt = private constant [512 x i8] c"You are an LLVM IR code generator for IRVibeOS. Given a user intent, generate valid LLVM IR code that implements it. Rules: Output ONLY valid LLVM IR (.ll format). Use opaque pointers (ptr not i8*). Declare external functions you need. Entry point: define i32 @main(). Keep it minimal and functional. No markdown, just raw IR.\00\00\00\00\00\00\00"
+@system_prompt = private constant [512 x i8] c"You are a code generator for IRVibeOS running on %s architecture. Generate EXECUTABLE MACHINE CODE (base64-encoded) that implements the user's intent. Output ONLY a JSON response: {\"binary\":\"<base64>\",\"entry_offset\":0}. The binary must be position-independent and ready to execute. Start with a function prologue, implement the logic, end with ret. No markdown, no explanations, just the JSON.\00\00\00\00\00\00\00"
 
 ; Vibe main entry / Vibe 主入口
 define i32 @vibe_loop() {
@@ -70,18 +74,18 @@ process:
   ; Show progress / 显示进度
   call void @display_text(ptr @generating_msg)
 
-  ; Call AI to generate IR / 调用 AI 生成 IR
+  ; Call AI to generate executable binary / 调用 AI 生成可执行二进制
   %provider = load i32, ptr @ai_provider
-  %ir_len = call i32 @call_ai(i32 %provider, ptr %intent_buf, i32 %intent_len, ptr %resp_buf, i32 16384)
-  %ir_ok = icmp sgt i32 %ir_len, 0
-  br i1 %ir_ok, label %compile, label %error
+  %binary_b64_len = call i32 @call_ai(i32 %provider, ptr %intent_buf, i32 %intent_len, ptr %resp_buf, i32 16384)
+  %ai_ok = icmp sgt i32 %binary_b64_len, 0
+  br i1 %ai_ok, label %decode, label %error
 
-compile:
-  ; Compile IR to native (via cloud service) / 编译 IR 为原生代码（通过云服务）
-  call void @display_text(ptr @compiling_msg)
-  %native_len = call i32 @compile_ir_cloud(ptr %resp_buf, i32 %ir_len, ptr %native_buf, i32 8192)
-  %compile_ok = icmp sgt i32 %native_len, 0
-  br i1 %compile_ok, label %execute, label %error
+decode:
+  ; Decode base64 binary from AI response / 从 AI 响应解码 base64 二进制
+  call void @display_text(ptr @loading_msg)
+  %native_len = call i32 @base64_decode(ptr %resp_buf, i32 %binary_b64_len, ptr %native_buf, i32 8192)
+  %decode_ok = icmp sgt i32 %native_len, 0
+  br i1 %decode_ok, label %execute, label %error
 
 execute:
   ; Allocate executable memory / 分配可执行内存
@@ -150,9 +154,9 @@ entry:
   br i1 %ok, label %extract, label %fail
 
 extract:
-  ; Extract IR from JSON response / 从 JSON 响应提取 IR
-  %ir_len = call i32 @extract_ir_from_openai_response(ptr %out_buf, i32 %out_size)
-  ret i32 %ir_len
+  ; Extract base64-encoded binary from JSON response / 从 JSON 响应提取 base64 编码的二进制
+  %binary_len = call i32 @extract_binary_from_openai_response(ptr %out_buf, i32 %out_size)
+  ret i32 %binary_len
 
 fail:
   ret i32 -1
@@ -172,8 +176,8 @@ entry:
   br i1 %ok, label %extract, label %fail
 
 extract:
-  %ir_len = call i32 @extract_ir_from_claude_response(ptr %out_buf, i32 %out_size)
-  ret i32 %ir_len
+  %binary_len = call i32 @extract_binary_from_claude_response(ptr %out_buf, i32 %out_size)
+  ret i32 %binary_len
 
 fail:
   ret i32 -1
@@ -194,8 +198,8 @@ entry:
   br i1 %ok, label %extract, label %fail
 
 extract:
-  %ir_len = call i32 @extract_ir_from_openai_response(ptr %out_buf, i32 %out_size)
-  ret i32 %ir_len
+  %binary_len = call i32 @extract_binary_from_openai_response(ptr %out_buf, i32 %out_size)
+  ret i32 %binary_len
 
 fail:
   ret i32 -1
@@ -217,22 +221,32 @@ define void @build_claude_headers(ptr %buf) {
 }
 
 define void @build_openai_body(ptr %intent, i32 %len, ptr %buf) {
-  ; TODO: build JSON: {"model":"...","messages":[{"role":"system","content":"..."},{"role":"user","content":"..."}]}
+  ; TODO: build JSON with target architecture in system prompt
+  ; {"model":"...","messages":[
+  ;   {"role":"system","content":"Generate base64 machine code for <target_arch>..."},
+  ;   {"role":"user","content":"<intent>"}
+  ; ]}
   ret void
 }
 
 define void @build_claude_body(ptr %intent, i32 %len, ptr %buf) {
-  ; TODO: build JSON: {"model":"...","max_tokens":4096,"system":"...","messages":[{"role":"user","content":"..."}]}
+  ; TODO: build JSON with target architecture in system prompt
+  ; {"model":"...","max_tokens":8192,"system":"Generate base64 machine code for <target_arch>...",
+  ;  "messages":[{"role":"user","content":"<intent>"}]}
   ret void
 }
 
-define i32 @extract_ir_from_openai_response(ptr %json, i32 %len) {
-  ; TODO: parse JSON, extract .choices[0].message.content, move to start of buffer, return length
+define i32 @extract_binary_from_openai_response(ptr %json, i32 %len) {
+  ; TODO: parse JSON response
+  ; Expected format: {"choices":[{"message":{"content":"{\"binary\":\"<base64>\"}"}}]}
+  ; Extract the binary field from the nested JSON, move to start of buffer, return length
   ret i32 0
 }
 
-define i32 @extract_ir_from_claude_response(ptr %json, i32 %len) {
-  ; TODO: parse JSON, extract .content[0].text, move to start of buffer, return length
+define i32 @extract_binary_from_claude_response(ptr %json, i32 %len) {
+  ; TODO: parse JSON response
+  ; Expected format: {"content":[{"text":"{\"binary\":\"<base64>\"}"}]}
+  ; Extract the binary field from the nested JSON, move to start of buffer, return length
   ret i32 0
 }
 
