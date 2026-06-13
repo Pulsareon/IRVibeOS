@@ -1,0 +1,7 @@
+/data/
+/target/
+/temp/
+*.obj
+*.exe
+*.dll
+*.pdb

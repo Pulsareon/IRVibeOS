@@ -1,0 +1,2 @@
+irvibeos.core >= 0.1
+libc.puts
