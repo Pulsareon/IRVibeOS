@@ -29,16 +29,18 @@ Interactive commands / 交互命令:
 import sys
 import struct
 import argparse
-import json
 import subprocess
 import tempfile
 import os
+from pathlib import Path
 
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
+# Allow running as `python host/ai_host.py` from repo root.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE.parent) not in sys.path:
+    sys.path.insert(0, str(_HERE.parent))
+
+from host.vibe.protocol import VibeProtocol  # noqa: E402
+from host.vibe.providers import create_provider  # noqa: E402
 
 SYNC = b'\xAA\x55'
 OP_EXEC = 1
@@ -119,93 +121,6 @@ class TalkLink:
         return struct.unpack('<I', data[:4])[0] if len(data) >= 4 else 0
 
 
-class AIClient:
-    """AI client supporting OpenAI-compatible and Claude APIs.
-    支持 OpenAI 兼容和 Claude API 的 AI 客户端。"""
-
-    def __init__(self, provider, api_key, api_base=None, model=None):
-        self.provider = provider
-        self.api_key = api_key
-        self.api_base = api_base
-        self.model = model or self._default_model()
-
-    def _default_model(self):
-        if self.provider == 'claude':
-            return 'claude-opus-4-20250514'
-        elif self.provider == 'openai':
-            return 'gpt-4'
-        else:
-            return 'llama3'
-
-    def generate_ir(self, intent, context=None):
-        """Generate LLVM IR from intent. / 根据意图生成 LLVM IR。"""
-        if not HAS_REQUESTS:
-            raise RuntimeError("requests library required for AI calls. Install: pip install requests")
-
-        system_prompt = """You are an LLVM IR code generator for IRVibeOS.
-Given a user intent, generate valid LLVM IR code that implements it.
-
-Rules:
-- Output ONLY valid LLVM IR (`.ll` format)
-- Use opaque pointers (LLVM 15+ syntax: `ptr` not `i8*`)
-- Declare external functions you need (e.g., `declare i32 @printf(ptr, ...)`)
-- The entry point should be `define i32 @main()` unless otherwise specified
-- Keep it minimal and functional
-- No markdown code blocks, just raw IR text
-"""
-
-        if context:
-            system_prompt += f"\nContext:\n{context}\n"
-
-        if self.provider == 'claude':
-            return self._call_claude(system_prompt, intent)
-        else:  # openai or openai-compatible
-            return self._call_openai_compatible(system_prompt, intent)
-
-    def _call_claude(self, system_prompt, user_message):
-        """Call Claude API (Anthropic format). / 调用 Claude API（Anthropic 格式）。"""
-        url = 'https://api.anthropic.com/v1/messages'
-        headers = {
-            'x-api-key': self.api_key,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-        }
-        body = {
-            'model': self.model,
-            'max_tokens': 4096,
-            'system': system_prompt,
-            'messages': [{'role': 'user', 'content': user_message}]
-        }
-
-        resp = requests.post(url, headers=headers, json=body, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        return data['content'][0]['text']
-
-    def _call_openai_compatible(self, system_prompt, user_message):
-        """Call OpenAI-compatible API (chat completion format).
-        调用 OpenAI 兼容 API（chat completion 格式）。"""
-        url = (self.api_base or 'https://api.openai.com/v1') + '/chat/completions'
-        headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-        body = {
-            'model': self.model,
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_message}
-            ],
-            'temperature': 0.7,
-            'max_tokens': 4096
-        }
-
-        resp = requests.post(url, headers=headers, json=body, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        return data['choices'][0]['message']['content']
-
-
 def compile_ir_to_native(ir_text, target_triple='x86_64-unknown-linux-gnu'):
     """Compile LLVM IR to native machine code. / 将 LLVM IR 编译为原生机器码。
 
@@ -263,13 +178,12 @@ def make_stdio_link():
     return TalkLink(stdin.read, lambda d: (stdout.write(d), stdout.flush()))
 
 
-def interactive(link, ai_client=None):
+def interactive(link, vibe_protocol=None):
     print("IRVibeOS Host (TALK protocol). Type 'help' for commands.")
     print("IRVibeOS 上位机（TALK 协议）。输入 'help' 查看命令。")
 
-    if ai_client:
-        print(f"AI enabled: {ai_client.provider} / {ai_client.model}")
-        print(f"AI 已启用：{ai_client.provider} / {ai_client.model}")
+    if vibe_protocol:
+        print("AI vibe enabled / AI vibe 已启用")
 
     while True:
         try:
@@ -289,7 +203,7 @@ def interactive(link, ai_client=None):
             print("  poke <hex_addr> <hex> — write memory / 写内存")
             print("  exec <file>           — execute binary / 执行二进制")
             print("  compile <ll_file>     — compile .ll and send / 编译 .ll 并发送")
-            if ai_client:
+            if vibe_protocol:
                 print("  vibe <intent>         — AI generates IR and loads / AI 生成 IR 并加载")
             print("  quit                  — exit / 退出")
 
@@ -353,22 +267,29 @@ def interactive(link, ai_client=None):
                 print(f"  File not found / 文件未找到: {ll_file}")
 
         elif cmd == 'vibe' and len(parts) >= 2:
-            if not ai_client:
+            if not vibe_protocol:
                 print("  AI not configured. Use --ai option. / AI 未配置。使用 --ai 选项。")
                 continue
 
             intent = parts[1]
             print(f"  Vibing: {intent}")
-            print("  Calling AI / 调用 AI 中...")
+            print("  Generating IR (with verify+repair) / 生成 IR 中（含验证+修复）...")
 
             try:
-                ir_text = ai_client.generate_ir(intent)
+                vibe_result = vibe_protocol.vibe(intent)
+
+                if not vibe_result.success:
+                    print(f"  Generation failed: {vibe_result.errors[-1]}")
+                    print(f"  生成失败：{vibe_result.errors[-1]}")
+                    continue
+
+                print(f"  Generated OK ({vibe_result.attempts} attempt(s))")
                 print("\n--- Generated IR ---")
-                print(ir_text)
+                print(vibe_result.ir_text)
                 print("--- End IR ---\n")
 
                 print("  Compiling / 编译中...")
-                native = compile_ir_to_native(ir_text)
+                native = compile_ir_to_native(vibe_result.ir_text)
 
                 if native:
                     print(f"  Compiled {len(native)} bytes, executing / 编译 {len(native)} 字节，执行中...")
@@ -413,16 +334,19 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # Setup AI client / 设置 AI 客户端
-    ai_client = None
+    # Setup vibe protocol / 设置 vibe 协议
+    vibe_protocol = None
     if args.ai:
-        if not args.api_key:
-            print("Error: --api-key required when using --ai")
-            print("错误：使用 --ai 时需要 --api-key")
+        try:
+            provider = create_provider(
+                args.ai, api_key=args.api_key, model=args.model, api_base=args.api_base
+            )
+            vibe_protocol = VibeProtocol(provider, max_retries=3, verbose=True)
+        except ValueError as e:
+            print(f"Error: {e}")
             sys.exit(1)
-        ai_client = AIClient(args.ai, args.api_key, args.api_base, args.model)
 
-    interactive(link, ai_client)
+    interactive(link, vibe_protocol)
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@
 /temp/
 /build/
 /build_arm/
+__pycache__/
 *.obj
 *.exe
 *.dll
