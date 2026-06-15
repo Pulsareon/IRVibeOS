@@ -2,176 +2,138 @@
 
 # IRVibeOS
 
-IRVibeOS 是一个以 LLVM IR 为唯一系统源码的操作系统。它从极小种子启动，生长为完整 OS，而创建软件的根本方式是 **vibe** —— 描述你的意图，获得可运行的程序。
+IRVibeOS 是一个以 LLVM IR 为核心源格式的 VibeOS/runtime 原型。当前 1.0 hosted 版本先聚焦一条真正可用的闭环：
 
-## 核心思想
-
-系统从种子演化为完整操作系统。长成后，它像任何 OS 一样运行程序、管理资源、提供 UI —— 但有一个根本区别：**软件通过意图创建，而非手写代码。**
-
-用户可以 vibe：
-- **程序** — "我需要一个文本编辑器" → 系统生成一个
-- **库** — "我需要 HTTP 客户端" → 可作为依赖使用
-- **服务** — "在 8080 端口跑个 Web 服务器" → 运行中
-- **UI** — 复杂度随硬件伸缩（串口文本 → 帧缓冲 → GPU 加速）
-
-产出全部是 LLVM IR。全部原生运行。
-
-## 工作原理
-
-```
-┌─────────────────────────────────────────────────────┐
-│                 成熟的 IRVibeOS                       │
-│                                                      │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐             │
-│  │  应用 A  │  │  应用 B  │  │  应用 C  │  ← vibe 出 │
-│  └────┬────┘  └────┬────┘  └────┬────┘             │
-│       │            │            │                    │
-│  ┌────┴────────────┴────────────┴────┐              │
-│  │           库 / 依赖               │  ← vibe 出   │
-│  └────────────────┬──────────────────┘              │
-│                   │                                  │
-│  ┌────────────────┴──────────────────┐              │
-│  │    OS 服务（调度、文件系统、网络）   │  ← 生长出    │
-│  └────────────────┬──────────────────┘              │
-│                   │                                  │
-│  ┌────────────────┴──────────────────┐              │
-│  │     Vibe 引擎（核心循环）          │  ← 种子      │
-│  │     意图 → IR → 验证 → 加载       │              │
-│  └───────────────────────────────────┘              │
-└─────────────────────────────────────────────────────┘
+```text
+意图 -> LLVM IR -> 验证 -> 保存为模块 -> 运行
 ```
 
-Vibe 引擎是从种子阶段就必须存在的唯一能力。它既是引导机制（生长 OS），也是永久的用户界面（OS 长成后创建软件）。
+长期目标是一个通过意图创建软件、并把软件保存为可验证 LLVM IR 的操作系统表面。更远的北极星是完整裸机 OS，加上接近 Claude Code / Codex 工作流质量的编码智能体界面。当前可用目标是运行在已有操作系统上的 hosted 模式。
 
-## 种子
+## 当前状态
 
-种子 = 在该硬件上启动 vibe 循环所需的最小代码。
+**1.0 hosted 模式已经可用**
 
-"最小"的含义随硬件不同而不同：
+- 用 `tools/verify.ps1` 验证全部 LLVM IR。
+- 用 `tools/build.ps1` 构建全部 `.ll` 文件。
+- 运行 `modules/<name>/main.ll` 形式的 hosted 模块。
+- 用 `host/hosted_vibe.py` 从意图生成模块。
+- 用 `lli src_ir\irvibeos.ll` 运行 hosted IR shell。
 
-| 硬件 | 种子提供 | Vibe 循环由谁驱动 |
-|------|---------|-----------------|
-| 弱 MCU (8KB RAM) | 启动 + UART 收发 + 执行槽 | 上位机 AI 通过串口推送 |
-| 联网设备 (ESP32) | 启动 + WiFi + 执行 | 云端 AI，设备直连 |
-| PC / VM | UEFI 应用：显示、键盘、网络、内存映射 | 本地 LLM 或云端 AI，用户通过键盘/屏幕交互 |
-| 已有 OS 上 | 一个进程 | 直接调 AI API，最简单 |
+**实验中 / 路线图**
 
-不变量：一旦 vibe 循环跑起来，生长就开始。
+- 裸机 EXEC payload 装载。
+- Tier1 ESP32 seed。
+- Tier2 UEFI seed。
+- 设备端 `vibe_engine.ll` 的 API 请求和响应解析。
+- 超出 `deps.txt` 简单约定的依赖求解。
 
-### MCU 种子
+## 快速开始
 
-实现两个函数：`seed_recv_byte`、`seed_send_byte`。编译后约 256 字节。
+需要：
 
-### PC 种子
+- LLVM 工具在 PATH 中：`llvm-as`、`llc`、`lli`。
+- Python 3。
+- 可选：使用 AI provider 时安装 `requests`。
 
-一个 UEFI 应用。UEFI 已经提供了显示、键盘、内存映射、网络、文件系统。种子利用这些连接 AI 并立即进入 vibe 循环——不需要盲目探测。
-
-### Hosted 种子
-
-普通进程，用 stdin/stdout。用于开发和测试。
-
-## TALK 协议（MCU 模式）
-
-受限设备与上位机通信：
-
-```
-上位机 → 设备:
-  [1B 操作码][4B 长度][载荷]
-  操作码: 0x01=EXEC  0x02=PEEK  0x03=POKE
-
-设备 → 上位机:
-  [1B 状态码][4B 长度][数据]
-```
-
-有能力的设备（PC、ESP32）不需要此协议——它们直接通过 HTTP/API 与 AI 对话。
-
-## Vibe 作为 OS 原语
-
-当系统长成后，vibe 成为获取软件的标准方式：
-
-```
-用户: "我需要一个文件管理器"
-  → AI 生成文件管理器的 IR
-  → 系统验证 IR
-  → 系统解析/vibe 出缺失的依赖
-  → 应用加载并运行
-
-用户: "给编辑器加上复制粘贴功能"
-  → AI 读取现有编辑器模块
-  → 生成更新后的 IR
-  → 热重载模块
-```
-
-Vibe 可以产出：
-- 独立程序（应用）
-- 共享库（其他模块可依赖）
-- 系统服务（守护进程、驱动）
-- UI 组件（如果有显示硬件）
-
-依赖被追踪。如果应用 A 需要库 X 而库 X 尚不存在，系统先 vibe 出库 X。
-
-## UI 伸缩
-
-系统根据可用硬件调整界面：
-
-| 硬件 | UI 形态 |
-|------|---------|
-| 仅 UART | 串口文本命令 |
-| 字符 LCD | 最小状态显示 |
-| 帧缓冲 | 终端 UI、简单图形 |
-| GPU | 窗口管理器、合成、富应用 |
-
-UI 不是预置的——是根据硬件能力 vibe 出来的。
-
-## 仓库作为知识库
-
-GitHub 仓库 (https://github.com/Pulsareon/IRVibeOS.git) 是 AI 的参考知识——不是软件包仓库。
-
-- 受限模式下：上位机 AI 读取仓库获取模式和平台笔记
-- 全能模式下：设备有网络后，AI 可以从仓库拉取参考
-- AI 根据当前设备情况调整所读内容——不是盲目复制
-
-## 仓库结构
-
-```
-IRVibeOS/
-  seed/                   各硬件等级的种子
-    tier0_mcu/            弱 MCU：UART 字节级种子
-    tier1_connected/      联网设备：WiFi/BLE 种子
-    tier2_pc/             PC/VM：UEFI 应用种子
-    tier3_hosted/         已有 OS 上：进程级种子
-
-  knowledge/              AI 参考知识（不在设备上执行）
-    patterns/             通用 IR 模式
-    platforms/            平台笔记和内存映射
-    examples/             以往生长成果
-
-  host/                   上位机工具
-    ai_host.py            通过串口与种子通信
-
-  src_ir/                 旧版 hosted shell（开发辅助）
-    irvibeos.ll
-
-  modules/                hosted 模式 IR 应用
-```
-
-## 硬源码规则
-
-所有系统源码都是 LLVM IR（`.ll` 或 `.bc`）。其他语言只出现在：
-
-- `knowledge/` 作为 AI 参考
-- `host/` 作为工具（在 PC 上运行，不在设备上）
-- `docs/` 作为文档
-
-设备永远不执行任何非 LLVM IR 生成的东西。
-
-## 快速开始（Hosted 模式）
-
-旧版 shell 仍可用于开发：
+验证和构建：
 
 ```powershell
-lli src_ir\irvibeos.ll
+.\tools\verify.ps1
+.\tools\build.ps1 -Clean
 ```
+
+运行 hosted shell：
+
+```powershell
+lli src_ir\irvibeos.ll apps
+"hello" | lli src_ir\irvibeos.ll run
+lli src_ir\irvibeos.ll verify
+```
+
+无网络生成一个模块：
+
+```powershell
+python host\hosted_vibe.py --name demo --intent "print a hello message" --provider template --run
+```
+
+使用 OpenAI 兼容 API 生成模块：
+
+```powershell
+python host\hosted_vibe.py `
+  --name ai_demo `
+  --intent "print three short lines about LLVM IR" `
+  --provider openai-compatible `
+  --api-base http://localhost:11434/v1 `
+  --api-key dummy `
+  --model llama3 `
+  --run
+```
+
+使用 OpenAI 或 Claude 时，传入 `--provider openai` 或 `--provider claude`，并提供 `--api-key` 和 `--model`；也可以设置 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 与 `IRVIBEOS_MODEL`。
+
+## 架构
+
+```text
+IRVibeOS/
+  src_ir/
+    irvibeos.ll          hosted IR shell：apps/run/deps/vibe/verify
+    vibe_engine.ll       实验性的设备端 vibe loop
+
+  host/
+    hosted_vibe.py       1.0 hosted 意图 -> IR -> 模块工具
+    ai_host.py           实验性的 TALK seed 上位机
+
+  modules/
+    <name>/main.ll       可运行 hosted 模块
+    <name>/deps.txt      简单依赖元数据
+
+  seed/
+    tier0_mcu/seed.ll    TALK seed 核心
+    tier3_hosted/seed.ll hosted 字节 I/O 适配
+    tier1_connected/     规划中的 ESP32 seed
+    tier2_pc/            规划中的 UEFI seed
+
+  knowledge/             AI 参考资料，不是运行时源码
+  tools/                 验证和构建脚本
+```
+
+## 模块约定
+
+hosted 模块位于 `modules/`：
+
+```text
+modules/example/
+  main.ll
+  deps.txt
+```
+
+`main.ll` 必须定义：
+
+```llvm
+define i32 @main()
+```
+
+`tools/verify.ps1` 会用 `llvm-as` 检查全部 `.ll`，并确认每个模块目录都有 `main.ll` 和 `deps.txt`。
+
+## 源码规则
+
+系统/设备源码是 LLVM IR（`.ll` 或 `.bc`）。其他语言只允许出现在：
+
+- `host/`：运行在 PC 上的开发工具。
+- `tools/`：仓库验证和构建工具。
+- `docs/` 与 `knowledge/`：文档和 AI 参考资料。
+
+## 路线图
+
+1. Hosted 1.0：意图到模块、验证、构建、模块 shell。
+2. Hosted 1.x：更安全的模块名、更丰富的元数据、依赖检查、更多示例。
+3. Seed runtime：定义 TALK EXEC 的可执行 payload 格式。
+4. 设备端 vibe：实现 `vibe_engine.ll` 的 JSON/API 解析和平台外部函数。
+5. 硬件层级：实现 ESP32 与 UEFI seeds。
+6. 裸机智能体 OS：QEMU 启动、内核、存储、网络、IR runtime、agent tool API、权限和回滚模型。
+
+完整目标见 `docs/BAREMETAL_AGENT_OS.md`。
 
 ## 参考
 

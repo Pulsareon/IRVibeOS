@@ -1,0 +1,47 @@
+name: hosted-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hosted:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM
+        shell: powershell
+        run: |
+          choco install llvm -y --no-progress
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Tool versions
+        shell: powershell
+        run: |
+          python --version
+          llvm-as --version
+          llc --version
+          lli --version
+
+      - name: Verify IR
+        shell: powershell
+        run: .\tools\verify.ps1
+
+      - name: Build IR
+        shell: powershell
+        run: .\tools\build.ps1 -Clean
+
+      - name: Hosted shell smoke test
+        shell: powershell
+        run: |
+          "hello" | lli src_ir\irvibeos.ll run
+          "test" | lli src_ir\irvibeos.ll run
+          "testmod" | lli src_ir\irvibeos.ll run
+
+      - name: Hosted vibe smoke test
+        shell: powershell
+        run: |
+          python host\hosted_vibe.py --name ci_demo --intent "print CI demo" --provider template --modules-dir "$env:RUNNER_TEMP\modules" --run

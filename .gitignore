@@ -2,6 +2,7 @@
 /target/
 /temp/
 /build/
+/build_arm/
 *.obj
 *.exe
 *.dll

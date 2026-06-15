@@ -1,5 +1,5 @@
 # IRVibeOS Build Tool
-# Compiles all IR files to target architecture
+# Compiles all LLVM IR files to the target architecture.
 
 param(
     [string]$Target = "x86_64-pc-windows-msvc",
@@ -28,15 +28,16 @@ Write-Host "Target: $Target" -ForegroundColor Green
 Write-Host "Output: $OutputDir" -ForegroundColor Green
 Write-Host ""
 
-# Define source files with output names
-$sources = @(
-    @{ Path = "src_ir/irvibeos.ll"; Output = "irvibeos.o" },
-    @{ Path = "src_ir/vibe_engine.ll"; Output = "vibe_engine.o" },
-    @{ Path = "seed/tier0_mcu/seed.ll"; Output = "seed_tier0.o" },
-    @{ Path = "seed/tier3_hosted/seed.ll"; Output = "seed_tier3.o" },
-    @{ Path = "modules/hello/main.ll"; Output = "hello_module.o" },
-    @{ Path = "examples/hello.ll"; Output = "hello.o" }
-)
+$root = (Get-Location).Path
+
+# Discover all source IR files. Generated and build outputs are excluded.
+$sources = Get-ChildItem -Recurse -Filter "*.ll" | Where-Object {
+    $_.FullName -notmatch "\\(build|build_arm|temp|target|data)\\"
+} | Sort-Object FullName | ForEach-Object {
+    $relative = $_.FullName.Replace($root + "\", "")
+    $output = ($relative -replace "[\\/:]", "_") -replace "\.ll$", ".o"
+    @{ Path = $relative; Output = $output }
+}
 
 $success = 0
 $failed = 0
